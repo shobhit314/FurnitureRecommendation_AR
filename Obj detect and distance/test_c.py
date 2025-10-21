@@ -1,0 +1,165 @@
+import cv2
+import numpy as np
+from ultralytics import YOLO
+
+# --- 1. Model Loading ---
+
+def load_model(model_path='yolov8n.pt'):
+    """Loads the YOLOv8 model from the specified path."""
+    model = YOLO(model_path)
+    return model
+
+# --- 2. Scene Detection Function ---
+
+def detect_scene(frame, model):
+    """
+    Detects objects in a given camera frame using the YOLO model.
+    Returns a list of detected objects with their details.
+    """
+    results = model(frame, stream=True, verbose=False)
+    detected_objects = []
+    
+    for result in results:
+        names = result.names
+        for box in result.boxes:
+            if box.conf > 0.6:  # Confidence threshold
+                detected_objects.append({
+                    "label": names[int(box.cls)],
+                    "confidence": float(box.conf),
+                    "box": box.xyxy[0].cpu().numpy().astype(int) # [x1, y1, x2, y2]
+                })
+    return detected_objects
+
+# --- 3. Optimal Placement Calculation Function ---
+
+def calculate_optimal_placement(detected_objects, new_object_dims):
+    """
+    Calculates the best placement spot on a detected surface.
+    For this simulation, we'll find empty space on the largest detected 'dining table'.
+    """
+    # Find the largest dining table to use as our target surface
+    target_surface = None
+    max_area = 0
+    for obj in detected_objects:
+        if obj["label"] == 'dining table':
+            box = obj["box"]
+            area = (box[2] - box[0]) * (box[3] - box[1])
+            if area > max_area:
+                max_area = area
+                target_surface = obj
+    
+    if not target_surface:
+        return None # No suitable surface found
+
+    # Define a grid of candidate points on the surface
+    surface_box = target_surface["box"]
+    step = 20
+    candidate_points = []
+    
+    x_coords = np.arange(surface_box[0] + step, surface_box[2] - step, step)
+    y_coords = np.arange(surface_box[1] + step, surface_box[3] - step, step)
+    
+    if len(x_coords) == 0 or len(y_coords) == 0:
+        return None # Surface is too small
+
+    for x in x_coords:
+        for y in y_coords:
+            candidate_points.append(np.array([x, y]))
+
+    if not candidate_points:
+        return None
+
+    # Score each point based on distance from other objects
+    best_point = None
+    max_score = -1
+
+    for point in candidate_points:
+        # Calculate the minimum distance to any other object on the table
+        min_dist = float('inf')
+        is_colliding = False
+        
+        for obj in detected_objects:
+            if obj is target_surface:
+                continue # Don't check against the table itself
+
+            obj_box = obj["box"]
+            # Check if the point is inside another object's box (collision)
+            if obj_box[0] < point[0] < obj_box[2] and obj_box[1] < point[1] < obj_box[3]:
+                is_colliding = True
+                break
+            
+            # Simple distance to the center of the object
+            obj_center = np.array([(obj_box[0] + obj_box[2]) / 2, (obj_box[1] + obj_box[3]) / 2])
+            dist = np.linalg.norm(point - obj_center)
+            if dist < min_dist:
+                min_dist = dist
+        
+        if is_colliding:
+            continue # Skip points that are inside an existing object
+
+        # The score is the distance to the nearest object. We want to maximize this.
+        score = min_dist
+        
+        if score > max_score:
+            max_score = score
+            best_point = point
+            
+    return best_point.astype(int) if best_point is not None else None
+
+# --- 4. Visualization Function ---
+
+def draw_visualizations(frame, detected_objects, best_placement):
+    """Draws bounding boxes and the optimal placement spot on the frame."""
+    # Draw all detected object boxes
+    for obj in detected_objects:
+        box = obj["box"]
+        label = f"{obj['label']} {obj['confidence']:.2f}"
+        cv2.rectangle(frame, (box[0], box[1]), (box[2], box[3]), (255, 0, 0), 2)
+        cv2.putText(frame, label, (box[0], box[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+
+    # Draw the best placement spot
+    if best_placement is not None:
+        cv2.circle(frame, tuple(best_placement), 15, (0, 255, 0), -1)
+        cv2.putText(frame, "Place Here", (best_placement[0] - 40, best_placement[1] - 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+    
+    return frame
+
+# --- Main Execution Loop ---
+
+if __name__ == "__main__":
+    print("Loading model...")
+    model = load_model()
+    
+    print("Starting webcam...")
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        print("Error: Cannot open camera.")
+        exit()
+
+    # Define the dimensions of the new object we want to place (in pixels for this simulation)
+    new_object_dimensions = (50, 50) 
+
+    while True:
+        success, frame = cap.read()
+        if not success:
+            break
+
+        # 1. Detect objects in the current frame
+        detected_objects = detect_scene(frame, model)
+        
+        # 2. Calculate the best placement for a new object
+        optimal_spot = calculate_optimal_placement(detected_objects, new_object_dimensions)
+        
+        # 3. Draw the results on the frame
+        output_frame = draw_visualizations(frame, detected_objects, optimal_spot)
+
+        # 4. Display the frame
+        cv2.imshow("AR Placement Logic - Backend Simulation", output_frame)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+    print("Stream ended.")
